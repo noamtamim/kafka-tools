@@ -1,12 +1,15 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
-	"github.com/confluentinc/confluent-kafka-go/kafka"
+	"github.com/IBM/sarama"
 	"log"
 	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
 )
 
 func main() {
@@ -18,15 +21,11 @@ func main() {
 
 	action := os.Args[1]
 	brokers := os.Args[2]
-
-	config := &kafka.ConfigMap{
-		"bootstrap.servers": brokers,
-		"client.id":         "kafka-tools",
-	}
+	brokersList := strings.Split(brokers, ",")
 
 	if action == "list" {
 		// Special case because it does not need a topic
-		listTopics(config)
+		listTopics(brokersList)
 		os.Exit(0)
 	}
 
@@ -40,155 +39,185 @@ func main() {
 
 	switch action {
 	case "consume":
-		consumeTopic(config, topic, options)
+		consumeTopic(brokersList, topic, options)
 	case "produce":
-		produceTopic(config, topic, options)
+		produceTopic(brokersList, topic, options)
 	case "create":
-		createTopic(config, topic, options)
+		createTopic(brokersList, topic, options)
 	case "delete":
-		deleteTopic(config, topic)
+		deleteTopic(brokersList, topic)
 	default:
 		panic("Unknown action")
 	}
 }
 
-func listTopics(config *kafka.ConfigMap) {
-	adminClient, err := kafka.NewAdminClient(config)
+func listTopics(brokers []string) {
+	admin, err := sarama.NewClusterAdmin(brokers, nil)
 	if err != nil {
 		panic(err)
 	}
 
-	res, err := adminClient.GetMetadata(nil, true, 1000)
+	topics, err := admin.ListTopics()
 	if err != nil {
 		panic(err)
 	}
-	for _, metadata := range res.Topics {
-		fmt.Println(metadata.Topic, len(metadata.Partitions))
+
+	for topic, details := range topics {
+		fmt.Println(topic, details.NumPartitions)
 	}
 
-	adminClient.Close()
+	err = admin.Close()
+	if err != nil {
+		panic(err)
+	}
 }
 
-func consumeTopic(config *kafka.ConfigMap, topic string, options []string) {
+func consumeTopic(brokers []string, topic string, options []string) {
 	flagSet := flag.NewFlagSet("consume", flag.ExitOnError)
 	fromBeginning := flagSet.Bool("from-beginning", false, "whether to consume from the beginning")
-	groupId := flagSet.String("group-id", "kafka-tools", "the group id to use")
-	if fromBeginning != nil && *fromBeginning {
-		_ = config.SetKey("auto.offset.reset", kafka.OffsetBeginning.String())
-	}
-	_ = config.SetKey("group.id", *groupId)
+
 	_ = flagSet.Parse(options)
 
-	consumer, err := kafka.NewConsumer(config)
+	initialOffset := sarama.OffsetNewest
+	if *fromBeginning {
+		initialOffset = sarama.OffsetOldest
+	}
+
+	c, err := sarama.NewConsumer(brokers, nil)
 	if err != nil {
 		panic(err)
 	}
 
-	err = consumer.Subscribe(topic, nil)
+	partitionList, err := c.Partitions(topic)
 	if err != nil {
 		panic(err)
 	}
 
-	for {
-		msg, err := consumer.ReadMessage(-1)
+	var (
+		messages = make(chan *sarama.ConsumerMessage, 256)
+		closing  = make(chan struct{})
+		wg       sync.WaitGroup
+	)
+
+	go func() {
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGTERM, os.Interrupt)
+		<-signals
+		log.Println("Initiating shutdown of consumer...")
+		close(closing)
+	}()
+
+	for _, partition := range partitionList {
+		pc, err := c.ConsumePartition(topic, partition, initialOffset)
 		if err != nil {
 			panic(err)
 		}
 
-		log.Printf("[%d]: %s", msg.TopicPartition.Partition, string(msg.Value))
+		go func(pc sarama.PartitionConsumer) {
+			<-closing
+			pc.AsyncClose()
+		}(pc)
+
+		wg.Add(1)
+		go func(pc sarama.PartitionConsumer) {
+			defer wg.Done()
+			for message := range pc.Messages() {
+				messages <- message
+			}
+		}(pc)
+	}
+
+	go func() {
+		for msg := range messages {
+			fmt.Println(string(msg.Value))
+		}
+	}()
+
+	wg.Wait()
+	log.Println("Done consuming topic", topic)
+	close(messages)
+
+	if err := c.Close(); err != nil {
+		log.Println("Failed to close consumer: ", err)
 	}
 }
 
-func produceTopic(config *kafka.ConfigMap, topic string, options []string) {
+func produceTopic(brokers []string, topic string, options []string) {
 	flagSet := flag.NewFlagSet("produce", flag.ExitOnError)
 	message := options[0]
 
 	key := flagSet.String("key", "", "the message key")
 	_ = flagSet.Parse(options[1:])
 
-	producer, err := kafka.NewProducer(config)
+	producer, err := sarama.NewSyncProducer(brokers, nil)
 	if err != nil {
 		panic(err)
 	}
 
-	deliveryChan := make(chan kafka.Event)
-	err = producer.Produce(&kafka.Message{
-		TopicPartition: kafka.TopicPartition{
-			Topic:     &topic,
-			Partition: kafka.PartitionAny,
-		},
-		Value: []byte(message),
-		Key:   []byte(*key),
-	}, deliveryChan)
+	defer func() {
+		if err := producer.Close(); err != nil {
+			log.Panic(err)
+		}
+	}()
+
+	msg := &sarama.ProducerMessage{
+		Topic: topic,
+		Value: sarama.StringEncoder(message),
+		Key:   sarama.StringEncoder(*key),
+	}
+
+	partition, offset, err := producer.SendMessage(msg)
 	if err != nil {
 		panic(err)
 	}
 
-	e := <-deliveryChan
-	m := e.(*kafka.Message)
-
-	if m.TopicPartition.Error != nil {
-		log.Printf("Delivery failed: %v", m.TopicPartition.Error)
-	} else {
-		log.Printf("Delivered message to partition %d", m.TopicPartition.Partition)
-	}
-
-	close(deliveryChan)
+	fmt.Printf("Message is stored in topic(%s)/partition(%d)/offset(%d)\n", topic, partition, offset)
 }
 
-func createTopic(config *kafka.ConfigMap, topic string, options []string) {
+func createTopic(brokers []string, topic string, options []string) {
 	flagSet := flag.NewFlagSet("create-topic", flag.ExitOnError)
-	partitions := flagSet.Uint("partitions", 1, "the number of partitions")
-	replicationFactor := flagSet.Uint("replication-factor", 1, "the replication factor")
+	partitions := flagSet.Int("partitions", 1, "the number of partitions")
+	replicationFactor := flagSet.Int("replication-factor", 1, "the replication factor")
 	_ = flagSet.Parse(options)
 
-	adminClient, err := kafka.NewAdminClient(config)
+	adminClient, err := sarama.NewClusterAdmin(brokers, nil)
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
-	res, err := adminClient.CreateTopics(context.Background(), []kafka.TopicSpecification{
-		{
-			Topic:             topic,
-			NumPartitions:     int(*partitions),
-			ReplicationFactor: int(*replicationFactor),
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
+	err = adminClient.CreateTopic(topic, &sarama.TopicDetail{
+		NumPartitions:     int32(*partitions),
+		ReplicationFactor: int16(*replicationFactor),
+	}, false)
 
-	for _, r := range res {
-		if r.Error.Code() != kafka.ErrNoError {
-			log.Println(r.Error)
-		} else {
-			log.Println("Created topic", r.Topic)
+	if err != nil {
+		fmt.Println("Failed to create topic:", err)
+		return
+	}
+	fmt.Println("Created topic", topic)
+	defer func() {
+		if err := adminClient.Close(); err != nil {
+			log.Panic(err)
 		}
-	}
-
-	adminClient.Close()
+	}()
 }
 
-func deleteTopic(config *kafka.ConfigMap, topic string) {
-	adminClient, err := kafka.NewAdminClient(config)
+func deleteTopic(brokers []string, topic string) {
+	adminClient, err := sarama.NewClusterAdmin(brokers, nil)
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
-	res, err := adminClient.DeleteTopics(context.Background(), []string{
-		topic,
-	})
+	err = adminClient.DeleteTopic(topic)
 	if err != nil {
-		panic(err)
+		log.Println("Failed to delete topic:", err)
+		return
 	}
 
-	for _, r := range res {
-		if r.Error.Code() != kafka.ErrNoError {
-			log.Println(r.Error)
-		} else {
-			log.Println("Deleted topic", r.Topic)
+	log.Println("Deleted topic", topic)
+	defer func() {
+		if err := adminClient.Close(); err != nil {
+			log.Panic(err)
 		}
-	}
-
-	adminClient.Close()
+	}()
 }
