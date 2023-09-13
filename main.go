@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/IBM/sarama"
@@ -15,8 +17,7 @@ import (
 func main() {
 
 	if len(os.Args) < 3 {
-		fmt.Println("You need to specify at least action, brokers. Most actions also require a topic.")
-		os.Exit(1)
+		usage()
 	}
 
 	action := os.Args[1]
@@ -51,6 +52,18 @@ func main() {
 	}
 }
 
+func usage() {
+	fmt.Println(`Usage: kafka-cli <action> <brokers> [topic] [options]`)
+	fmt.Println(`Actions:`)
+	fmt.Println(`  list`)
+	fmt.Println(`  consume`)
+	fmt.Println(`  produce`)
+	fmt.Println(`  create`)
+	fmt.Println(`  delete`)
+	fmt.Println(`All actions except list require the topic.`)
+	os.Exit(1)
+}
+
 func listTopics(brokers []string) {
 	admin, err := sarama.NewClusterAdmin(brokers, nil)
 	if err != nil {
@@ -63,7 +76,7 @@ func listTopics(brokers []string) {
 	}
 
 	for topic, details := range topics {
-		fmt.Println(topic, details.NumPartitions)
+		fmt.Println("Topic:", topic, "NumPartitions:", details.NumPartitions)
 	}
 
 	err = admin.Close()
@@ -74,6 +87,9 @@ func listTopics(brokers []string) {
 
 func consumeTopic(brokers []string, topic string, options []string) {
 	flagSet := flag.NewFlagSet("consume", flag.ExitOnError)
+	rawValue := flagSet.Bool("raw", false, "only print raw values (no partition, offset, key)")
+	binary := flagSet.Bool("binary", false, "expect binary data and print it as base64")
+	binaryKey := flagSet.Bool("binary-key", false, "expect binary key and print it as base64")
 	fromBeginning := flagSet.Bool("from-beginning", false, "whether to consume from the beginning")
 
 	_ = flagSet.Parse(options)
@@ -129,7 +145,25 @@ func consumeTopic(brokers []string, topic string, options []string) {
 
 	go func() {
 		for msg := range messages {
-			fmt.Println(string(msg.Value))
+			value := getValue(msg.Value, *binary)
+			key := getValue(msg.Key, *binaryKey)
+
+			if *rawValue {
+				fmt.Println(value)
+
+			} else {
+				data, err := json.Marshal(&map[string]any{
+					"partition": msg.Partition,
+					"offset":    msg.Offset,
+					"key":       key,
+					"value":     value,
+				})
+				if err != nil {
+					panic(err)
+				}
+
+				fmt.Println(string(data))
+			}
 		}
 	}()
 
@@ -139,6 +173,14 @@ func consumeTopic(brokers []string, topic string, options []string) {
 
 	if err := c.Close(); err != nil {
 		log.Println("Failed to close consumer: ", err)
+	}
+}
+
+func getValue(value []byte, binary bool) string {
+	if binary {
+		return base64.StdEncoding.EncodeToString(value)
+	} else {
+		return string(value)
 	}
 }
 
