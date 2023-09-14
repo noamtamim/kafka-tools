@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -59,7 +60,7 @@ Usage: kafka-tools ACTION BROKERS [TOPIC] [OPTIONS]
 list BROKERS [--system]
 consume BROKERS TOPIC [--raw] [--from-beginning]
 produce BROKERS TOPIC MESSAGE [--key KEY]
-create BROKERS TOPIC [--partitions PARTITIONS] [--replication-factor FACTOR]
+create BROKERS TOPIC [--partitions PARTITIONS] [--replication-factor FACTOR] [--min-insync-replicas REPLICAS]
 delete BROKERS TOPIC [--yes]
 `)
 	os.Exit(1)
@@ -267,6 +268,7 @@ func createTopic(brokers []string, topic string, options []string) {
 	flagSet := flag.NewFlagSet("create-topic", flag.ExitOnError)
 	partitions := flagSet.Int("partitions", -1, "the number of partitions")
 	replicationFactor := flagSet.Int("replication-factor", -1, "the replication factor")
+	minInsyncReplicas := flagSet.Int("min-insync-replicas", 0, "the minimum number of in-sync replicas")
 	_ = flagSet.Parse(options)
 
 	adminClient, err := sarama.NewClusterAdmin(brokers, nil)
@@ -274,9 +276,16 @@ func createTopic(brokers []string, topic string, options []string) {
 		log.Panic(err)
 	}
 
+	configEntries := make(map[string]*string)
+	if *minInsyncReplicas > 0 {
+		minInsyncReplicasString := strconv.Itoa(*minInsyncReplicas)
+		configEntries["min.insync.replicas"] = &minInsyncReplicasString
+	}
+
 	err = adminClient.CreateTopic(topic, &sarama.TopicDetail{
 		NumPartitions:     int32(*partitions),
 		ReplicationFactor: int16(*replicationFactor),
+		ConfigEntries:     configEntries,
 	}, false)
 
 	if err != nil {
