@@ -12,12 +12,13 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unicode/utf8"
 )
 
 func main() {
 
 	if len(os.Args) < 3 {
-		usage()
+		usageAndExit()
 	}
 
 	action := os.Args[1]
@@ -31,8 +32,7 @@ func main() {
 	}
 
 	if len(os.Args) < 4 {
-		fmt.Println("After actions and brokers, you need to specify a topic.")
-		os.Exit(1)
+		usageAndExit()
 	}
 
 	topic := os.Args[3]
@@ -46,51 +46,68 @@ func main() {
 	case "create":
 		createTopic(brokersList, topic, options)
 	case "delete":
-		deleteTopic(brokersList, topic)
+		deleteTopic(brokersList, topic, options)
 	default:
-		panic("Unknown action")
+		log.Panic("Unknown action")
 	}
 }
 
-func usage() {
-	fmt.Println(`Usage: kafka-cli <action> <brokers> [topic] [options]`)
-	fmt.Println(`Actions:`)
-	fmt.Println(`  list`)
-	fmt.Println(`  consume`)
-	fmt.Println(`  produce`)
-	fmt.Println(`  create`)
-	fmt.Println(`  delete`)
-	fmt.Println(`All actions except list require the topic.`)
+func usageAndExit() {
+	fmt.Print(`
+Usage: kafka-tools ACTION BROKERS [TOPIC] [OPTIONS]
+
+list BROKERS [--system]
+consume BROKERS TOPIC [--raw] [--from-beginning]
+produce BROKERS TOPIC MESSAGE [--key KEY]
+create BROKERS TOPIC [--partitions PARTITIONS] [--replication-factor FACTOR]
+delete BROKERS TOPIC
+`)
 	os.Exit(1)
 }
 
+func jsonEncode(v any) string {
+	j, _ := json.Marshal(v)
+	return string(j)
+}
+
 func listTopics(brokers []string) {
+	flagSet := flag.NewFlagSet("list", flag.ExitOnError)
+	showSystemTopics := flagSet.Bool("system", false, "show system topics")
+	_ = flagSet.Parse(os.Args[3:])
+
 	admin, err := sarama.NewClusterAdmin(brokers, nil)
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
 	topics, err := admin.ListTopics()
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
 	for topic, details := range topics {
-		fmt.Println("Topic:", topic, "NumPartitions:", details.NumPartitions)
+		if !*showSystemTopics && strings.HasPrefix(topic, "__") {
+			continue
+		}
+		fmt.Println("Topic:", topic)
+		fmt.Println("    ",
+			"NumPartitions:", details.NumPartitions,
+			"ReplicationFactor:", details.ReplicationFactor,
+			"ReplicaAssignment:", jsonEncode(details.ReplicaAssignment),
+			"ConfigEntries:", jsonEncode(details.ConfigEntries),
+		)
 	}
 
 	err = admin.Close()
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 }
 
 func consumeTopic(brokers []string, topic string, options []string) {
 	flagSet := flag.NewFlagSet("consume", flag.ExitOnError)
-	rawValue := flagSet.Bool("raw", false, "only print raw values (no partition, offset, key)")
-	binary := flagSet.Bool("binary", false, "expect binary data and print it as base64")
-	binaryKey := flagSet.Bool("binary-key", false, "expect binary key and print it as base64")
-	fromBeginning := flagSet.Bool("from-beginning", false, "whether to consume from the beginning")
+	rawOutput := flagSet.Bool("raw", false, "print raw values")
+	fromBeginning := flagSet.Bool("from-beginning", false, "consume from the oldest offset")
 
 	_ = flagSet.Parse(options)
 
@@ -101,12 +118,12 @@ func consumeTopic(brokers []string, topic string, options []string) {
 
 	c, err := sarama.NewConsumer(brokers, nil)
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
 	partitionList, err := c.Partitions(topic)
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
 	var (
@@ -126,7 +143,7 @@ func consumeTopic(brokers []string, topic string, options []string) {
 	for _, partition := range partitionList {
 		pc, err := c.ConsumePartition(topic, partition, initialOffset)
 		if err != nil {
-			panic(err)
+			log.Panic(err)
 		}
 
 		go func(pc sarama.PartitionConsumer) {
@@ -145,25 +162,7 @@ func consumeTopic(brokers []string, topic string, options []string) {
 
 	go func() {
 		for msg := range messages {
-			value := getValue(msg.Value, *binary)
-			key := getValue(msg.Key, *binaryKey)
-
-			if *rawValue {
-				fmt.Println(value)
-
-			} else {
-				data, err := json.Marshal(&map[string]any{
-					"partition": msg.Partition,
-					"offset":    msg.Offset,
-					"key":       key,
-					"value":     value,
-				})
-				if err != nil {
-					panic(err)
-				}
-
-				fmt.Println(string(data))
-			}
+			printMessage(msg, *rawOutput)
 		}
 	}()
 
@@ -176,11 +175,59 @@ func consumeTopic(brokers []string, topic string, options []string) {
 	}
 }
 
-func getValue(value []byte, binary bool) string {
-	if binary {
-		return base64.StdEncoding.EncodeToString(value)
+func printMessage(msg *sarama.ConsumerMessage, rawValue bool) {
+	value, binaryValue := getString(msg.Value)
+	key, binaryKey := getString(msg.Key)
+
+	if rawValue {
+		fmt.Println(value)
+
 	} else {
-		return string(value)
+		headers := make([]header, len(msg.Headers))
+		for i, h := range msg.Headers {
+			var key, binaryKey = getString(h.Key)
+			var value, binaryValue = getString(h.Value)
+			headers[i] = header{
+				Key:         key,
+				BinaryKey:   binaryKey,
+				Value:       value,
+				BinaryValue: binaryValue,
+			}
+		}
+		fmt.Println(jsonEncode(&message{
+			Value:       value,
+			BinaryValue: binaryValue,
+			Key:         key,
+			BinaryKey:   binaryKey,
+			//Topic:     msg.Topic,
+			Partition: msg.Partition,
+			Offset:    msg.Offset,
+			Headers:   headers,
+		}))
+	}
+}
+
+type header struct {
+	Key         string `json:"key"`
+	BinaryKey   bool   `json:"binaryKey"`
+	Value       string `json:"value"`
+	BinaryValue bool   `json:"binaryValue"`
+}
+type message struct {
+	Value       string   `json:"value"`
+	BinaryValue bool     `json:"binaryValue"`
+	Key         string   `json:"key"`
+	BinaryKey   bool     `json:"binaryKey"`
+	Partition   int32    `json:"partition"`
+	Offset      int64    `json:"offset"`
+	Headers     []header `json:"headers"`
+}
+
+func getString(value []byte) (string, bool) {
+	if utf8.Valid(value) {
+		return string(value), false
+	} else {
+		return base64.StdEncoding.EncodeToString(value), true
 	}
 }
 
@@ -193,7 +240,7 @@ func produceTopic(brokers []string, topic string, options []string) {
 
 	producer, err := sarama.NewSyncProducer(brokers, nil)
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
 	defer func() {
@@ -210,7 +257,7 @@ func produceTopic(brokers []string, topic string, options []string) {
 
 	partition, offset, err := producer.SendMessage(msg)
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 
 	fmt.Printf("Message is stored in topic(%s)/partition(%d)/offset(%d)\n", topic, partition, offset)
@@ -218,8 +265,8 @@ func produceTopic(brokers []string, topic string, options []string) {
 
 func createTopic(brokers []string, topic string, options []string) {
 	flagSet := flag.NewFlagSet("create-topic", flag.ExitOnError)
-	partitions := flagSet.Int("partitions", 1, "the number of partitions")
-	replicationFactor := flagSet.Int("replication-factor", 1, "the replication factor")
+	partitions := flagSet.Int("partitions", -1, "the number of partitions")
+	replicationFactor := flagSet.Int("replication-factor", -1, "the replication factor")
 	_ = flagSet.Parse(options)
 
 	adminClient, err := sarama.NewClusterAdmin(brokers, nil)
@@ -233,8 +280,7 @@ func createTopic(brokers []string, topic string, options []string) {
 	}, false)
 
 	if err != nil {
-		fmt.Println("Failed to create topic:", err)
-		return
+		log.Panic("Failed to create topic:", err)
 	}
 	fmt.Println("Created topic", topic)
 	defer func() {
@@ -244,16 +290,29 @@ func createTopic(brokers []string, topic string, options []string) {
 	}()
 }
 
-func deleteTopic(brokers []string, topic string) {
+func deleteTopic(brokers []string, topic string, options []string) {
+	flagSet := flag.NewFlagSet("delete-topic", flag.ExitOnError)
+	confirmed := flagSet.Bool("yes", false, "delete without asking")
+	_ = flagSet.Parse(options)
 	adminClient, err := sarama.NewClusterAdmin(brokers, nil)
 	if err != nil {
 		log.Panic(err)
 	}
 
+	if !*confirmed {
+		// Prompt the user to confirm deletion
+		fmt.Printf("Are you sure you want to delete topic %s? (y/N): ", topic)
+		var response string
+		_, err := fmt.Scanln(&response)
+		if err != nil || response != "y" {
+			fmt.Println("Aborting deletion")
+			return
+		}
+	}
+
 	err = adminClient.DeleteTopic(topic)
 	if err != nil {
-		log.Println("Failed to delete topic:", err)
-		return
+		log.Panic("Failed to delete topic:", err)
 	}
 
 	log.Println("Deleted topic", topic)
