@@ -37,4 +37,5 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: |
         TAG=${{ github.event.inputs.tag }}
-        gh release create $TAG kafka-tools
+        tar czf kafka-tools.tgz kafka-tools
+        gh release create $TAG kafka-tools.tgz
