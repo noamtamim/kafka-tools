@@ -60,7 +60,7 @@ list BROKERS [--system]
 consume BROKERS TOPIC [--raw] [--from-beginning]
 produce BROKERS TOPIC MESSAGE [--key KEY]
 create BROKERS TOPIC [--partitions PARTITIONS] [--replication-factor FACTOR]
-delete BROKERS TOPIC
+delete BROKERS TOPIC [--yes]
 `)
 	os.Exit(1)
 }
