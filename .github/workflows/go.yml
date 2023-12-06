@@ -20,9 +20,9 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu, macos]
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}-latest
     
     steps:
     - uses: actions/checkout@v3
@@ -42,5 +42,6 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: |
         TAG=${{ github.event.inputs.tag }}
-        tar czf kafka-tools.tgz kafka-tools
-        gh release create $TAG kafka-tools.tgz
+        TGZ=kafka-tools-${{ matrix.os }}.tgz
+        tar czf $TGZ kafka-tools
+        gh release create $TAG $TGZ
