@@ -44,4 +44,5 @@ jobs:
         TAG=${{ github.event.inputs.tag }}
         TGZ=kafka-tools-${{ matrix.os }}.tgz
         tar czf $TGZ kafka-tools
-        gh release create $TAG $TGZ
+
+        gh release create $TAG $TGZ || gh release upload $TAG $TGZ
