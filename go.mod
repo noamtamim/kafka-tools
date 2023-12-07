@@ -1,6 +1,6 @@
 module kafka-tools
 
-go 1.20
+go 1.21
 
 require github.com/IBM/sarama v1.41.1
 
