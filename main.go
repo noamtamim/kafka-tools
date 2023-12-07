@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/IBM/sarama"
 	"log"
 	"os"
 	"os/signal"
@@ -14,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"unicode/utf8"
+
+	"github.com/IBM/sarama"
 )
 
 func main() {
@@ -22,8 +23,9 @@ func main() {
 		usageAndExit()
 	}
 
-	action := os.Args[1]
-	brokers := os.Args[2]
+	brokers := os.Args[1]
+	action := os.Args[2]
+
 	brokersList := strings.Split(brokers, ",")
 
 	if action == "list" {
@@ -55,13 +57,14 @@ func main() {
 
 func usageAndExit() {
 	fmt.Print(`
-Usage: kafka-tools ACTION BROKERS [TOPIC] [OPTIONS]
+Usage: kafka-tools BROKERS ACTION [TOPIC] [OPTIONS]
 
-list BROKERS [--system]
-consume BROKERS TOPIC [--raw] [--from-beginning]
-produce BROKERS TOPIC MESSAGE [--key KEY]
-create BROKERS TOPIC [--partitions PARTITIONS] [--replication-factor FACTOR] [--min-insync-replicas REPLICAS]
-delete BROKERS TOPIC [--yes]
+Actions:
+list [--system]
+consume TOPIC [--raw] [--from-beginning]
+produce TOPIC MESSAGE [--key KEY]
+create TOPIC [--partitions PARTITIONS] [--replication-factor FACTOR] [--min-insync-replicas REPLICAS]
+delete TOPIC [--yes]
 `)
 	os.Exit(1)
 }
