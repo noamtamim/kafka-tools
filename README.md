@@ -15,8 +15,8 @@ This creates a `kafka-tools` binary in the current directory. You can leave it t
 Usage: kafka-tools BROKERS ACTION [TOPIC] [OPTIONS]
 
 Actions:
-list [--system]
-consume TOPIC [--raw] [--from-beginning]
-produce TOPIC MESSAGE [--key KEY]
-create TOPIC [--partitions PARTITIONS] [--replication-factor FACTOR] [--min-insync-replicas REPLICAS]
-delete TOPIC [--yes]
+- list [--system]
+- consume TOPIC [--raw] [--from-beginning]
+- produce TOPIC MESSAGE [--key KEY]
+- create TOPIC [--partitions PARTITIONS] [--replication-factor FACTOR] [--min-insync-replicas REPLICAS]
+- delete TOPIC [--yes]
