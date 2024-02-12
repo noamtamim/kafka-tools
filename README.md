@@ -4,8 +4,14 @@ A multi-purpose binary for interacting with Kafka for debugging purposes.
 
 ## Download and Extract
 
+### Linux
 ```sh
-curl -L https://github.com/noamtamim/kafka-tools/releases/latest/download/kafka-tools-linux.tgz | tar xz
+curl -L https://github.com/noamtamim/kafka-tools/releases/latest/download/kafka-tools-linux.tar.gz | tar xz
+```
+
+### Mac
+```sh
+curl -L https://github.com/noamtamim/kafka-tools/releases/latest/download/kafka-tools-macos.tar.gz | tar xz
 ```
 
 This creates a `kafka-tools` binary in the current directory. You can leave it there or move it elsewhere.
